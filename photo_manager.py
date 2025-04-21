@@ -9,7 +9,6 @@ from typing import List, Tuple, Optional
 from caption_generator import CaptionGenerator
 from database import ImageDatabase
 import threading
-import face_recognition
 import tkinter as tk
 
 class PhotoManager:
@@ -18,34 +17,19 @@ class PhotoManager:
         self.caption_generator = caption_generator
         self.db = db
         self.current_sort = "Date"
-        self.face_net = None
         self.nlp_model = None
-        self.metadata_thread = None
-        self.face_thread = None
+        self.caption_thread = None
         logging.debug("PhotoManager initialized")
 
     def load_model(self):
         try:
-            model_dir = os.path.dirname(os.path.abspath(__file__))
-            prototxt_path = os.path.join(model_dir, "deploy.prototxt")
-            caffemodel_path = os.path.join(model_dir, "res10_300x300_ssd_iter_140000.caffemodel")
-            
-            logging.debug(f"Checking for OpenCV DNN model files: {prototxt_path}, {caffemodel_path}")
-            if not (os.path.exists(prototxt_path) and os.path.exists(caffemodel_path)):
-                logging.warning(f"OpenCV DNN model files missing: {prototxt_path}, {caffemodel_path}. Face detection disabled.")
-                self.face_net = None
-                return
-            
-            self.face_net = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
-            logging.info("Loaded OpenCV DNN face detection model")
-            
+            logging.info("Loading SentenceTransformer model")
             from sentence_transformers import SentenceTransformer
             self.nlp_model = SentenceTransformer('all-MiniLM-L6-v2')
-            logging.info("Loaded SentenceTransformer model")
-            
+            logging.info("SentenceTransformer model loaded successfully")
         except Exception as e:
-            logging.exception(f"Error loading models: {str(e)}")
-            self.face_net = None
+            logging.exception(f"Error loading NLP model: {str(e)}")
+            self.nlp_model = None
 
     def load_photos(self, folder: str, status_var: Optional[tk.StringVar] = None):
         try:
@@ -57,7 +41,7 @@ class PhotoManager:
             if not os.access(folder, os.R_OK):
                 raise PermissionError(f"No read permissions for folder: {folder}")
             
-            # Try to get all metadata; fall back to individual queries if method is missing
+            # Get existing metadata
             try:
                 existing_metadata = {m["file_path"]: m for m in self.db.get_all_metadata()}
             except AttributeError:
@@ -103,24 +87,14 @@ class PhotoManager:
             self.set_sort(self.current_sort)
             
             if status_var:
-                status_var.set(f"Scanning {folder}...")
+                status_var.set(f"Generating captions for {len(photos)} photos...")
             
-            self.metadata_thread = threading.Thread(
-                target=self._process_metadata,
+            self.caption_thread = threading.Thread(
+                target=self._process_captions,
                 args=(self.photos, status_var),
                 daemon=True
             )
-            self.metadata_thread.start()
-            
-            if self.face_net:
-                self.face_thread = threading.Thread(
-                    target=self._process_faces,
-                    args=(self.photos, status_var),
-                    daemon=True
-                )
-                self.face_thread.start()
-            else:
-                logging.info("Skipping face detection due to missing or failed model")
+            self.caption_thread.start()
             
             logging.info(f"Loaded {len(self.photos)} photos from {folder}")
             
@@ -130,86 +104,36 @@ class PhotoManager:
                 status_var.set(f"Error loading photos: {str(e)}")
             raise
 
-    def _process_metadata(self, photos: List[Tuple[str, datetime, int, str, str]], status_var: Optional[tk.StringVar] = None):
+    def _process_captions(self, photos: List[Tuple[str, datetime, int, str, str]], status_var: Optional[tk.StringVar] = None):
         try:
-            logging.info("Starting metadata processing")
+            logging.info("Starting caption processing")
             total = len(photos)
-            for i, (file_path, date, size, location, _) in enumerate(photos):
+            for i, (file_path, date, size, location, tags) in enumerate(photos):
                 try:
-                    with open(file_path, 'rb') as f:
-                        tags = exifread.process_file(f)
-                        location = tags.get('GPS GPSLatitude', 'Unknown').values
-                        if isinstance(location, list):
-                            location = ','.join(str(x) for x in location)
-                    
-                    image_tags = self.caption_generator.generate_tags(file_path)
-                    tags_str = ', '.join(image_tags) if image_tags else ""
-                    
-                    self.db.add_image(file_path, date.isoformat(), size, str(location), tags_str)
-                    
-                    if status_var:
-                        status_var.set(f"Processing metadata: {i + 1}/{total}")
-                    
-                    logging.debug(f"Processed metadata for {file_path}")
-                
-                except Exception as e:
-                    logging.exception(f"Error processing metadata for {file_path}: {str(e)}")
-                    continue
-            
-            if status_var:
-                status_var.set(f"Processed metadata for {total} photos")
-            logging.info("Completed metadata processing")
-            
-        except Exception as e:
-            logging.exception(f"Error in metadata processing thread: {str(e)}")
-
-    def _process_faces(self, photos: List[Tuple[str, datetime, int, str, str]], status_var: Optional[tk.StringVar] = None):
-        try:
-            logging.info("Starting face detection processing")
-            total = len(photos)
-            for i, (file_path, _, _, _, _) in enumerate(photos):
-                try:
-                    # Load image with OpenCV
-                    img = cv2.imread(file_path)
-                    if img is None:
-                        logging.warning(f"Failed to read image {file_path}")
+                    # Skip if caption already exists
+                    metadata = self.db.get_image_metadata(file_path)
+                    if metadata and metadata.get('detailed_caption'):
+                        logging.debug(f"Skipping caption for {file_path}: already exists")
                         continue
                     
-                    # Convert BGR to RGB for face_recognition
-                    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    
-                    # Detect faces using face_recognition
-                    face_locations = face_recognition.face_locations(rgb_img, model='hog')
-                    encodings = face_recognition.face_encodings(rgb_img, face_locations)
-                    
-                    for (top, right, bottom, left), encoding in zip(face_locations, encodings):
-                        if encoding is not None:
-                            self.db.add_face(
-                                file_path,
-                                encoding,
-                                None,
-                                int(top) if top is not None else 0,
-                                int(right) if right is not None else 0,
-                                int(bottom) if bottom is not None else 0,
-                                int(left) if left is not None else 0
-                            )
-                            logging.debug(f"Stored face for {file_path} at ({left}, {top}, {right}, {bottom})")
+                    caption = self.caption_generator.generate_image_caption(file_path)
+                    self.db.add_image(file_path, date.isoformat(), size, location, tags, caption)
                     
                     if status_var:
-                        status_var.set(f"Processing faces: {i + 1}/{total}")
+                        status_var.set(f"Processing captions: {i + 1}/{total}")
                     
-                    logging.debug(f"Processed faces for {file_path}: {len(face_locations)} faces found")
+                    logging.debug(f"Generated caption for {file_path}")
                 
                 except Exception as e:
-                    logging.exception(f"Error processing faces for {file_path}: {str(e)}")
+                    logging.exception(f"Error processing caption for {file_path}: {str(e)}")
                     continue
             
             if status_var:
-                status_var.set(f"Processed faces for {total} photos")
-            logging.info("Completed face detection processing")
+                status_var.set(f"Processed captions for {total} photos")
+            logging.info("Completed caption processing")
             
         except Exception as e:
-            logging.exception(f"Error in face detection thread: {str(e)}")
+            logging.exception(f"Error in caption processing thread: {str(e)}")
 
     def set_sort(self, sort_by: str):
         try:
@@ -231,49 +155,36 @@ class PhotoManager:
             if not query:
                 return self.photos
             
-            results = []
-            query_lower = query.lower()
+            if not self.nlp_model:
+                logging.warning("NLP model not loaded; returning all photos")
+                return self.photos
             
-            # Parse query for person names
-            person_names = []
-            if "with" in query_lower:
-                parts = query_lower.split("with")
-                if len(parts) > 1:
-                    person_names = [name.strip() for name in parts[1].split("and")]
+            # Get all captions from database
+            metadata = self.db.get_all_metadata()
+            photo_captions = [(m['file_path'], m.get('detailed_caption', '')) for m in metadata]
+            caption_texts = [caption for _, caption in photo_captions if caption]
+            file_paths = [file_path for file_path, caption in photo_captions if caption]
             
-            # Search by tags
-            tags = query_lower.split()
-            tag_results = set()
-            for tag in tags:
-                if tag not in person_names:
-                    images = self.db.get_images_by_tag(tag)
-                    tag_results.update(images)
+            if not caption_texts:
+                logging.warning("No captions found in database")
+                return []
             
-            # Search by person
-            person_results = set()
-            for name in person_names:
-                images = self.db.get_images_by_person(name)
-                person_results.update(images)
+            # Encode captions and query
+            caption_embeddings = self.nlp_model.encode(caption_texts)
+            query_embedding = self.nlp_model.encode([query])[0]
             
-            # Combine results
-            if tag_results or person_results:
-                combined_results = tag_results | person_results
-                results = [photo for photo in self.photos if photo[0] in combined_results]
-            else:
-                # Fallback to NLP-based search if no tags or persons
-                if self.nlp_model:
-                    photo_captions = [(photo[0], photo[4]) for photo in self.photos]
-                    caption_texts = [caption for _, caption in photo_captions]
-                    caption_embeddings = self.nlp_model.encode(caption_texts)
-                    query_embedding = self.nlp_model.encode([query])[0]
-                    similarities = np.dot(caption_embeddings, query_embedding) / (
-                        np.linalg.norm(caption_embeddings, axis=1) * np.linalg.norm(query_embedding)
-                    )
-                    top_k = min(10, len(self.photos))
-                    top_indices = np.argsort(similarities)[::-1][:top_k]
-                    results = [self.photos[i] for i in top_indices if similarities[i] > 0.3]
-                else:
-                    results = self.photos
+            # Compute similarities
+            similarities = np.dot(caption_embeddings, query_embedding) / (
+                np.linalg.norm(caption_embeddings, axis=1) * np.linalg.norm(query_embedding)
+            )
+            
+            # Get top results
+            top_k = min(10, len(file_paths))
+            top_indices = np.argsort(similarities)[::-1][:top_k]
+            results = [
+                photo for photo in self.photos
+                if photo[0] in [file_paths[i] for i in top_indices if similarities[i] > 0.3]
+            ]
             
             logging.info(f"Search returned {len(results)} photos for query: {query}")
             return results
