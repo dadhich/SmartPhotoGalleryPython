@@ -250,18 +250,33 @@ class UIManager:
             
             # Draw clickable rectangles for faces
             faces = self.db.get_faces(file_path)
+            if not faces:
+                logging.warning(f"No faces found for {file_path}")
+                canvas.create_text(
+                    img_width // 2, img_height // 2,
+                    text="No faces detected. Try another image.",
+                    fill="yellow", font=('Arial', 14, 'bold')
+                )
+            
+            original_img = Image.open(file_path)
+            orig_width, orig_height = original_img.size
+            
             for i, face in enumerate(faces):
                 try:
-                    top = face['top'] or 0
-                    right = face['right'] or 0
-                    bottom = face['bottom'] or 0
-                    left = face['left'] or 0
+                    top = face.get('top', 0) or 0
+                    right = face.get('right', 0) or 0
+                    bottom = face.get('bottom', 0) or 0
+                    left = face.get('left', 0) or 0
                     encoding = face['encoding']
-                    name = face['name'] or f"Face {i + 1}"
+                    name = face.get('name') or f"Face {i + 1}"
+                    
+                    if top == 0 and right == 0 and bottom == 0 and left == 0:
+                        logging.warning(f"Invalid face coordinates for {file_path}: {top}, {right}, {bottom}, {left}")
+                        continue
                     
                     # Scale coordinates to match resized image
-                    scale_x = img_width / self.root.winfo_screenwidth()
-                    scale_y = img_height / self.root.winfo_screenheight()
+                    scale_x = img_width / orig_width
+                    scale_y = img_height / orig_height
                     scaled_top = top * scale_y
                     scaled_right = right * scale_x
                     scaled_bottom = bottom * scale_y
@@ -270,17 +285,17 @@ class UIManager:
                     # Create transparent rectangle with yellow border
                     rect_id = canvas.create_rectangle(
                         scaled_left, scaled_top, scaled_right, scaled_bottom,
-                        outline='yellow', width=2, fill=''
+                        outline='yellow', width=3, fill=''
                     )
                     
                     # Bind click event to open naming dialog
-                    def tag_face(event, f_path=file_path, enc=encoding):
+                    def tag_face(event, f_path=file_path, enc=encoding, rect_id=rect_id):
                         name = simpledialog.askstring("Tag Face", "Enter name for this face:", parent=full_window)
                         if name:
                             self.db.update_face_name(f_path, enc, name)
                             logging.info(f"Tagged face in {f_path} as {name}")
-                            # Update label if it exists
-                            for widget in canvas.find_withtag(f"label_{i}"):
+                            # Update label
+                            for widget in canvas.find_withtag(f"label_{rect_id}"):
                                 canvas.itemconfig(widget, text=name)
                     
                     canvas.tag_bind(rect_id, '<Button-1>', tag_face)
@@ -289,10 +304,10 @@ class UIManager:
                     label_id = canvas.create_text(
                         scaled_left + 5, scaled_top - 10,
                         text=name, anchor='sw', fill='yellow',
-                        font=('Arial', 12, 'bold'), tags=f"label_{i}"
+                        font=('Arial', 12, 'bold'), tags=f"label_{rect_id}"
                     )
                     
-                    logging.debug(f"Drew face rectangle for {file_path} at ({left}, {top}, {right}, {bottom})")
+                    logging.debug(f"Drew face rectangle for {file_path} at scaled ({scaled_left}, {scaled_top}, {scaled_right}, {scaled_bottom})")
                     
                 except Exception as e:
                     logging.exception(f"Error drawing face rectangle for {file_path}: {str(e)}")
@@ -346,12 +361,24 @@ class UIManager:
                 try:
                     caption = self.caption_generator.generate_image_caption(file_path)
                     self.root.after(0, lambda: caption_label.config(text=caption))
+                    
+                    # Get metadata, use defaults if None
+                    metadata = self.db.get_image_metadata(file_path)
+                    if metadata is None:
+                        logging.warning(f"No metadata found for {file_path}, using defaults")
+                        metadata = {
+                            'date': '',
+                            'size': 0,
+                            'location': '',
+                            'tags': ''
+                        }
+                    
                     self.db.add_image(
                         file_path,
-                        self.db.get_image_metadata(file_path).get('date', ''),
-                        self.db.get_image_metadata(file_path).get('size', 0),
-                        self.db.get_image_metadata(file_path).get('location', ''),
-                        self.db.get_image_metadata(file_path).get('tags', ''),
+                        metadata.get('date', ''),
+                        metadata.get('size', 0),
+                        metadata.get('location', ''),
+                        metadata.get('tags', ''),
                         caption
                     )
                     logging.debug(f"Generated caption for {file_path}")

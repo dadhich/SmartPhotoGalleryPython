@@ -169,44 +169,36 @@ class PhotoManager:
             total = len(photos)
             for i, (file_path, _, _, _, _) in enumerate(photos):
                 try:
+                    # Load image with OpenCV
                     img = cv2.imread(file_path)
                     if img is None:
                         logging.warning(f"Failed to read image {file_path}")
                         continue
                     
-                    h, w = img.shape[:2]
-                    blob = cv2.dnn.blobFromImage(cv2.resize(img, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-                    self.face_net.setInput(blob)
-                    detections = self.face_net.forward()
+                    # Convert BGR to RGB for face_recognition
+                    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     
-                    for j in range(detections.shape[2]):
-                        confidence = detections[0, 0, j, 2]
-                        if confidence > 0.5:
-                            box = detections[0, 0, j, 3:7] * np.array([w, h, w, h])
-                            (left, top, right, bottom) = box.astype("int")
-                            
-                            face_img = img[top:bottom, left:right]
-                            if face_img.size == 0:
-                                continue
-                            
-                            encodings = face_recognition.face_encodings(face_img)
-                            if encodings:
-                                encoding = encodings[0]
-                                # Store coordinates as integers; handle None or invalid values
-                                self.db.add_face(
-                                    file_path,
-                                    encoding,
-                                    None,
-                                    int(top) if top is not None else 0,
-                                    int(right) if right is not None else 0,
-                                    int(bottom) if bottom is not None else 0,
-                                    int(left) if left is not None else 0
-                                )
+                    # Detect faces using face_recognition
+                    face_locations = face_recognition.face_locations(rgb_img, model='hog')
+                    encodings = face_recognition.face_encodings(rgb_img, face_locations)
+                    
+                    for (top, right, bottom, left), encoding in zip(face_locations, encodings):
+                        if encoding is not None:
+                            self.db.add_face(
+                                file_path,
+                                encoding,
+                                None,
+                                int(top) if top is not None else 0,
+                                int(right) if right is not None else 0,
+                                int(bottom) if bottom is not None else 0,
+                                int(left) if left is not None else 0
+                            )
+                            logging.debug(f"Stored face for {file_path} at ({left}, {top}, {right}, {bottom})")
                     
                     if status_var:
                         status_var.set(f"Processing faces: {i + 1}/{total}")
                     
-                    logging.debug(f"Processed faces for {file_path}")
+                    logging.debug(f"Processed faces for {file_path}: {len(face_locations)} faces found")
                 
                 except Exception as e:
                     logging.exception(f"Error processing faces for {file_path}: {str(e)}")
