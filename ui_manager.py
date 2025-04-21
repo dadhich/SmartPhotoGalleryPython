@@ -1,405 +1,364 @@
 import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
+from tkinter import ttk, filedialog, simpledialog
+import os
 from PIL import Image, ImageTk
 import logging
-import math
-from typing import Callable
+from typing import Optional
 from photo_manager import PhotoManager
 from caption_generator import CaptionGenerator
 from database import ImageDatabase
+import threading
+import queue
 
-class LoadingSpinner:
-    def __init__(self, parent, label: ttk.Label, prefix: str = "Loading"):
+class GifAnimation:
+    def __init__(self, root: tk.Tk, parent: tk.Widget, text: str, gif_path: str):
+        self.root = root
         self.parent = parent
-        self.label = label
-        self.prefix = prefix
-        self.frames = ["-", "\\", "|", "/"]
+        self.text = text
+        self.gif_path = gif_path
+        self.frames = []
         self.current_frame = 0
         self.running = False
+        self.overlay = None
+        self.label = None
+        self.load_gif()
+
+    def load_gif(self):
+        try:
+            with Image.open(self.gif_path) as img:
+                for i in range(img.n_frames):
+                    img.seek(i)
+                    frame = img.copy().resize((50, 50), Image.Resampling.LANCZOS)
+                    self.frames.append(ImageTk.PhotoImage(frame))
+            logging.debug(f"Loaded {len(self.frames)} frames from {self.gif_path}")
+        except Exception as e:
+            logging.exception(f"Error loading GIF {self.gif_path}: {str(e)}")
+            self.frames = []
+
+    def create_overlay(self):
+        try:
+            self.overlay = tk.Toplevel(self.parent)
+            self.overlay.attributes('-alpha', 0.8)
+            self.overlay.overrideredirect(True)
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = (screen_width - 100) // 2
+            y = (screen_height - 100) // 2
+            self.overlay.geometry(f"100x100+{x}+{y}")
+            self.label = ttk.Label(self.overlay, text=self.text)
+            self.label.pack()
+            if self.frames:
+                self.label.config(image=self.frames[0])
+            logging.debug("Created GIF overlay")
+        except Exception as e:
+            logging.exception(f"Error creating overlay: {str(e)}")
+            self.label = ttk.Label(self.parent, text=f"{self.text}...")
+            self.label.pack()
+
+    def animate(self):
+        if self.running and self.frames:
+            self.current_frame = (self.current_frame + 1) % len(self.frames)
+            self.label.config(image=self.frames[self.current_frame])
+            self.root.after(100, self.animate)
+        elif not self.frames and self.label:
+            self.label.config(text=f"{self.text}...")
 
     def start(self):
-        if not self.running:
+        try:
             self.running = True
-            self.update()
+            self.create_overlay()
+            self.animate()
+            logging.debug("Started GIF animation")
+        except Exception as e:
+            logging.exception(f"Error starting GIF animation: {str(e)}")
+            self.label = ttk.Label(self.parent, text=f"{self.text}...")
+            self.label.pack()
+            self.running = True
 
     def stop(self):
         self.running = False
-        self.label.config(text="")
-
-    def update(self):
-        if self.running:
-            self.label.config(text=f"{self.prefix} {self.frames[self.current_frame]}")
-            self.current_frame = (self.current_frame + 1) % len(self.frames)
-            self.parent.after(100, self.update)
+        if self.overlay:
+            self.overlay.destroy()
+        elif self.label:
+            self.label.destroy()
+        logging.debug("Stopped GIF animation")
 
 class UIManager:
-    def __init__(self, root: tk.Tk, photo_manager: PhotoManager, caption_generator: CaptionGenerator, db: ImageDatabase):
+    def __init__(self, root: tk.Tk, photo_manager: PhotoManager, caption_generator: CaptionGenerator, db: ImageDatabase, status_var: tk.StringVar):
         self.root = root
         self.photo_manager = photo_manager
         self.caption_generator = caption_generator
         self.db = db
-        self.thumbnail_size = (150, 150)
+        self.status_var = status_var
         self.displayed_photos = []
+        self.caption_queue = queue.Queue()
+        self.caption_thread = threading.Thread(target=self._process_captions, daemon=True)
+        self.caption_thread.start()
         
-        self.setup_gui()
+        self.setup_ui()
+        logging.debug("UIManager initialized")
 
-    def setup_gui(self):
-        try:
-            self.root.configure(bg="#f0f2f5")
-            style = ttk.Style()
-            style.configure("TButton", padding=10, font=("Helvetica", 12))
-            style.configure("TLabel", font=("Helvetica", 11), background="#f0f2f5")
-            style.configure("TCombobox", font=("Helvetica", 11))
+    def setup_ui(self):
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Top controls
+        self.top_frame = ttk.Frame(self.main_frame)
+        self.top_frame.pack(fill=tk.X)
+        
+        self.folder_button = ttk.Button(self.top_frame, text="Select Folder", command=self.select_folder)
+        self.folder_button.pack(side=tk.LEFT, padx=5)
+        
+        self.folder_label = ttk.Label(self.top_frame, text="No folder selected")
+        self.folder_label.pack(side=tk.LEFT, padx=5)
+        
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(self.top_frame, textvariable=self.search_var)
+        self.search_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.search_entry.bind('<Return>', self.search_photos)
+        
+        self.sort_var = tk.StringVar(value="Date")
+        self.sort_menu = ttk.OptionMenu(self.top_frame, self.sort_var, "Date", "Date", "Size", "Name", command=self.sort_photos)
+        self.sort_menu.pack(side=tk.LEFT, padx=5)
+        
+        # Scrollable photo grid
+        self.canvas = tk.Canvas(self.main_frame)
+        self.scrollbar = ttk.Scrollbar(self.main_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        self.canvas_frame = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        
+        # Status bar
+        self.status_label = ttk.Label(self.main_frame, textvariable=self.status_var)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.folder_spinner = GifAnimation(self.root, self.main_frame, "Loading", "loading.gif")
+        self.search_spinner = GifAnimation(self.root, self.main_frame, "Searching", "loading.gif")
+        
+        logging.debug("UI setup completed")
 
-            self.main_frame = ttk.Frame(self.root, padding="20", style="TFrame")
-            self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-            
-            self.folder_frame = ttk.Frame(self.main_frame)
-            self.folder_frame.grid(row=0, column=0, sticky=tk.W, pady=10)
-            
-            self.folder_button = ttk.Button(
-                self.folder_frame, 
-                text="Select Folder", 
-                command=self.select_folder,
-                style="TButton"
-            )
-            self.folder_button.grid(row=0, column=0, padx=10)
-            
-            self.folder_label = ttk.Label(self.folder_frame, text="No folder selected", style="TLabel")
-            self.folder_label.grid(row=0, column=1, padx=10)
-            
-            self.folder_spinner_label = ttk.Label(self.folder_frame, text="", style="TLabel")
-            self.folder_spinner_label.grid(row=0, column=2, padx=10)
-            self.folder_spinner = LoadingSpinner(self.root, self.folder_spinner_label, "Loading")
-            
-            self.search_frame = ttk.Frame(self.main_frame)
-            self.search_frame.grid(row=1, column=0, sticky=tk.W, pady=10)
-            
-            self.search_entry = ttk.Entry(self.search_frame, width=50, font=("Helvetica", 11))
-            self.search_entry.grid(row=0, column=0, padx=10)
-            self.search_entry.insert(0, "Enter search query (e.g., 'photos with dogs')")
-            self.search_entry.bind("<FocusIn>", lambda e: self.search_entry.delete(0, tk.END) if self.search_entry.get() == "Enter search query (e.g., 'photos with dogs')" else None)
-            self.search_entry.bind("<Return>", lambda e: self.search_photos())
-            
-            self.search_button = ttk.Button(
-                self.search_frame, 
-                text="Search", 
-                command=self.search_photos,
-                style="TButton"
-            )
-            self.search_button.grid(row=0, column=1, padx=10)
-            
-            self.search_spinner_label = ttk.Label(self.search_frame, text="", style="TLabel")
-            self.search_spinner_label.grid(row=0, column=2, padx=10)
-            self.search_spinner = LoadingSpinner(self.root, self.search_spinner_label, "Searching")
-            
-            self.sort_frame = ttk.Frame(self.main_frame)
-            self.sort_frame.grid(row=2, column=0, sticky=tk.W, pady=10)
-            
-            ttk.Label(self.sort_frame, text="Sort by:", style="TLabel").grid(row=0, column=0, padx=10)
-            self.sort_combo = ttk.Combobox(
-                self.sort_frame, 
-                values=["Date", "Size", "Name"],
-                state="readonly",
-                width=10,
-                style="TCombobox"
-            )
-            self.sort_combo.set("Date")
-            self.sort_combo.grid(row=0, column=1, padx=10)
-            self.sort_combo.bind("<<ComboboxSelected>>", self.on_sort_change)
-            
-            self.canvas = tk.Canvas(self.main_frame, bg="#ffffff", highlightthickness=0, borderwidth=0)
-            self.scrollbar = ttk.Scrollbar(
-                self.main_frame, 
-                orient=tk.VERTICAL, 
-                command=self.canvas.yview
-            )
-            self.scrollable_frame = ttk.Frame(self.canvas)
-            
-            self.scrollable_frame.bind(
-                "<Configure>",
-                lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-            )
-            
-            self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-            self.canvas.configure(yscrollcommand=self.scrollbar.set)
-            
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_grid)
-            self.canvas.bind_all("<Button-4>", self._on_mousewheel_grid)
-            self.canvas.bind_all("<Button-5>", self._on_mousewheel_grid)
-            
-            self.canvas.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-            self.scrollbar.grid(row=3, column=1, sticky=(tk.N, tk.S))
-            
-            self.root.columnconfigure(0, weight=1)
-            self.root.rowconfigure(0, weight=1)
-            self.main_frame.columnconfigure(0, weight=1)
-            self.main_frame.rowconfigure(3, weight=1)
-            
-            logging.info("GUI setup completed successfully")
-            
-        except Exception as e:
-            logging.error(f"Error setting up GUI: {str(e)}")
-            self.show_error("Failed to initialize GUI")
-
-    def _on_mousewheel_grid(self, event):
-        try:
-            delta = event.delta if event.delta else (-1 if event.num == 5 else 1) * 120
-            self.canvas.yview_scroll(-1 * (delta // 120), "units")
-            logging.debug(f"Grid view scrolled with mouse wheel: delta={delta}")
-        except Exception as e:
-            logging.error(f"Error handling mouse wheel in grid view: {str(e)}")
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.canvas_frame, width=event.width)
 
     def select_folder(self):
         try:
             folder = filedialog.askdirectory()
             if folder:
                 self.folder_label.config(text=folder)
+                self.status_var.set(f"Loading {folder}...")
                 self.folder_spinner.start()
-                self.root.after(100, lambda: self.load_and_display_photos(folder))
-                logging.info(f"Selected folder: {folder}")
+                try:
+                    self.load_and_display_photos(folder)
+                except Exception as e:
+                    self.status_var.set(f"Error loading folder: {str(e)}")
+                    logging.exception(f"Error loading folder {folder}: {str(e)}")
+                finally:
+                    self.folder_spinner.stop()
         except Exception as e:
-            logging.error(f"Error selecting folder: {str(e)}")
-            self.show_error("Failed to select folder")
+            self.status_var.set(f"Error selecting folder: {str(e)}")
+            logging.exception(f"Error selecting folder: {str(e)}")
+            self.folder_spinner.stop()
 
     def load_and_display_photos(self, folder: str):
         try:
-            self.photo_manager.load_photos(folder)
-            self.displayed_photos = self.photo_manager.photos
-            self.display_photos()
+            self.photo_manager.load_photos(folder, self.status_var)
+            self.display_photos(self.photo_manager.photos)
+            logging.info(f"Displayed photos from {folder}")
         except Exception as e:
-            self.show_error("Failed to load photos")
-        finally:
-            self.folder_spinner.stop()
+            self.status_var.set(f"Error loading photos: {str(e)}")
+            logging.exception(f"Error loading photos from {folder}: {str(e)}")
 
-    def search_photos(self):
-        try:
-            query = self.search_entry.get().strip()
-            if not query:
-                self.displayed_photos = self.photo_manager.photos
-                self.display_photos()
-                return
-            
-            self.search_spinner.start()
-            self.root.after(100, lambda: self.execute_search(query))
-        except Exception as e:
-            logging.error(f"Error initiating search: {str(e)}")
-            self.show_error("Failed to search photos")
-
-    def execute_search(self, query: str):
-        try:
-            self.displayed_photos = self.photo_manager.search_photos(query)
-            self.display_photos()
-        except Exception as e:
-            logging.error(f"Error executing search: {str(e)}")
-            self.show_error("Failed to execute search")
-        finally:
-            self.search_spinner.stop()
-
-    def display_photos(self):
-        try:
-            for widget in self.scrollable_frame.winfo_children():
-                widget.destroy()
-            
-            if not self.displayed_photos:
-                ttk.Label(self.scrollable_frame, text="No photos found", style="TLabel").grid(row=0, column=0)
-                return
-            
-            canvas_width = self.canvas.winfo_width() or 1200
-            cols = max(1, canvas_width // (self.thumbnail_size[0] + 20))
-            
-            for i, (file_path, date, size, location, tags) in enumerate(self.displayed_photos):
-                try:
-                    img = Image.open(file_path)
-                    img.thumbnail(self.thumbnail_size)
-                    photo = ImageTk.PhotoImage(img)
-                    
-                    photo_frame = ttk.Frame(self.scrollable_frame)
-                    photo_frame.grid(row=i // cols, column=i % cols, padx=10, pady=10)
-                    
-                    label = ttk.Label(photo_frame, image=photo)
-                    label.image = photo
-                    label.grid(row=0, column=0)
-                    label.bind("<Double-1>", lambda e, path=file_path: self.open_full_image(path))
-                    
-                    ttk.Label(
-                        photo_frame, 
-                        text=f"Date: {date.strftime('%Y-%m-%d')}",
-                        style="TLabel"
-                    ).grid(row=1, column=0)
-                    ttk.Label(
-                        photo_frame, 
-                        text=f"Size: {size / 1024:.1f} KB",
-                        style="TLabel"
-                    ).grid(row=2, column=0)
-                    ttk.Label(
-                        photo_frame, 
-                        text=f"Location: {location}",
-                        style="TLabel"
-                    ).grid(row=3, column=0)
-                    ttk.Label(
-                        photo_frame, 
-                        text=f"Tags: {tags}",
-                        style="TLabel"
-                    ).grid(row=4, column=0)
-                except Exception as e:
-                    logging.warning(f"Error displaying photo {file_path}: {str(e)}")
-                    continue
-            
-            logging.info(f"Displayed {len(self.displayed_photos)} photos")
-            
-        except Exception as e:
-            logging.error(f"Error displaying photos: {str(e)}")
-            self.show_error("Failed to display photos")
-
-    def on_sort_change(self, event):
-        try:
-            self.photo_manager.set_sort(self.sort_combo.get())
-            self.displayed_photos = self.photo_manager.photos
-            self.display_photos()
-            logging.info(f"Sort changed to {self.photo_manager.current_sort}")
-        except Exception as e:
-            logging.error(f"Error changing sort: {str(e)}")
-            self.show_error("Failed to change sort order")
+    def display_photos(self, photos: list):
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        self.displayed_photos = photos
+        if not photos:
+            self.status_var.set("No photos found")
+            return
+        
+        max_cols = 4
+        thumbnail_size = (200, 200)
+        
+        for i, (file_path, date, size, location, tags) in enumerate(photos):
+            try:
+                img = Image.open(file_path)
+                img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                
+                frame = ttk.Frame(self.scrollable_frame)
+                row = i // max_cols
+                col = i % max_cols
+                frame.grid(row=row, column=col, padx=5, pady=5)
+                
+                label = ttk.Label(frame, image=photo)
+                label.image = photo
+                label.pack()
+                label.bind("<Double-1>", lambda e, path=file_path: self.open_full_image(path))
+                
+                name_label = ttk.Label(frame, text=os.path.basename(file_path))
+                name_label.pack()
+                
+                logging.debug(f"Displayed thumbnail for {file_path}")
+                
+            except Exception as e:
+                logging.exception(f"Error displaying thumbnail for {file_path}: {str(e)}")
+                continue
+        
+        self.status_var.set(f"Displaying {len(photos)} photos")
 
     def open_full_image(self, file_path: str):
         try:
-            full_image_window = tk.Toplevel(self.root)
-            full_image_window.title("Full Image View")
-            full_image_window.geometry("800x600")
-            full_image_window.configure(bg="#f0f2f5")
+            full_window = tk.Toplevel(self.root)
+            full_window.title(os.path.basename(file_path))
+            full_window.state('zoomed')
             
-            original_img = Image.open(file_path)
+            canvas = tk.Canvas(full_window, highlightthickness=0)
+            canvas.pack(fill=tk.BOTH, expand=True)
             
-            caption_frame = ttk.Frame(full_image_window)
-            caption_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
-            caption_spinner_label = ttk.Label(caption_frame, text="", style="TLabel")
-            caption_spinner_label.grid(row=0, column=0, padx=10)
-            caption_spinner = LoadingSpinner(full_image_window, caption_spinner_label, "Generating")
+            img = Image.open(file_path)
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight() - 100
+            img.thumbnail((screen_width, screen_height), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
             
-            # Check database for cached caption
-            metadata = self.db.get_image_metadata(file_path)
-            caption = metadata.get("detailed_caption") if metadata else None
+            img_width, img_height = img.size
+            canvas.create_image(0, 0, image=photo, anchor="nw")
+            canvas.image = photo
             
-            def set_caption():
-                nonlocal caption
-                if not caption:
-                    caption_spinner.start()
-                    caption = self.caption_generator.generate_image_caption(file_path)
-                    self.db.update_detailed_caption(file_path, caption)
-                caption_label.config(text=caption)
-                caption_spinner.stop()
+            canvas.config(scrollregion=(0, 0, img_width, img_height))
             
-            full_image_window.after(100, set_caption)
+            caption_frame = ttk.Frame(full_window)
+            caption_frame.pack(fill=tk.X, side=tk.BOTTOM)
             
-            zoom_factor = 1.0
-            max_zoom = 3.0
-            min_zoom = 0.3
+            caption_label = ttk.Label(caption_frame, text="Generating caption...")
+            caption_label.pack(pady=5)
             
-            canvas = tk.Canvas(full_image_window, bg="#ffffff", highlightthickness=0)
-            v_scrollbar = ttk.Scrollbar(full_image_window, orient=tk.VERTICAL, command=canvas.yview)
-            h_scrollbar = ttk.Scrollbar(full_image_window, orient=tk.HORIZONTAL, command=canvas.xview)
+            self.caption_queue.put((file_path, caption_label))
             
-            canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-            
-            canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-            v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-            h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
-            
-            full_image_window.columnconfigure(0, weight=1)
-            full_image_window.rowconfigure(0, weight=1)
-            
-            image_frame = ttk.Frame(canvas)
-            canvas.create_window((0, 0), window=image_frame, anchor="nw")
-            
-            image_label = ttk.Label(image_frame)
-            image_label.grid(row=0, column=0, padx=10, pady=10)
-            
-            caption_label = ttk.Label(image_frame, text="Generating caption...", wraplength=780, style="TLabel")
-            caption_label.grid(row=1, column=0, pady=5)
-            
-            def update_image():
+            # Draw clickable rectangles for faces
+            faces = self.db.get_faces(file_path)
+            for i, face in enumerate(faces):
                 try:
-                    new_size = (
-                        int(original_img.width * zoom_factor),
-                        int(original_img.height * zoom_factor)
+                    top = face['top'] or 0
+                    right = face['right'] or 0
+                    bottom = face['bottom'] or 0
+                    left = face['left'] or 0
+                    encoding = face['encoding']
+                    name = face['name'] or f"Face {i + 1}"
+                    
+                    # Scale coordinates to match resized image
+                    scale_x = img_width / self.root.winfo_screenwidth()
+                    scale_y = img_height / self.root.winfo_screenheight()
+                    scaled_top = top * scale_y
+                    scaled_right = right * scale_x
+                    scaled_bottom = bottom * scale_y
+                    scaled_left = left * scale_x
+                    
+                    # Create transparent rectangle with yellow border
+                    rect_id = canvas.create_rectangle(
+                        scaled_left, scaled_top, scaled_right, scaled_bottom,
+                        outline='yellow', width=2, fill=''
                     )
-                    resized_img = original_img.resize(new_size, Image.LANCZOS)
-                    photo = ImageTk.PhotoImage(resized_img)
-                    image_label.configure(image=photo)
-                    image_label.image = photo
-                    canvas.configure(scrollregion=(0, 0, new_size[0], new_size[1] + 100))
-                    logging.info(f"Image zoomed to factor {zoom_factor} for {file_path}")
+                    
+                    # Bind click event to open naming dialog
+                    def tag_face(event, f_path=file_path, enc=encoding):
+                        name = simpledialog.askstring("Tag Face", "Enter name for this face:", parent=full_window)
+                        if name:
+                            self.db.update_face_name(f_path, enc, name)
+                            logging.info(f"Tagged face in {f_path} as {name}")
+                            # Update label if it exists
+                            for widget in canvas.find_withtag(f"label_{i}"):
+                                canvas.itemconfig(widget, text=name)
+                    
+                    canvas.tag_bind(rect_id, '<Button-1>', tag_face)
+                    
+                    # Add label for face name
+                    label_id = canvas.create_text(
+                        scaled_left + 5, scaled_top - 10,
+                        text=name, anchor='sw', fill='yellow',
+                        font=('Arial', 12, 'bold'), tags=f"label_{i}"
+                    )
+                    
+                    logging.debug(f"Drew face rectangle for {file_path} at ({left}, {top}, {right}, {bottom})")
+                    
                 except Exception as e:
-                    logging.error(f"Error updating zoomed image: {str(e)}")
-                    self.show_error("Failed to update zoomed image")
+                    logging.exception(f"Error drawing face rectangle for {file_path}: {str(e)}")
+                    continue
             
-            update_image()
+            def on_closing():
+                full_window.destroy()
+                canvas.yview_scroll = lambda *args, **kwargs: None
+                logging.debug(f"Closed full image window for {file_path}")
             
-            def _on_mousewheel_full(event):
-                try:
-                    delta = event.delta if event.delta else (-1 if event.num == 5 else 1) * 120
-                    canvas.yview_scroll(-1 * (delta // 120), "units")
-                    logging.debug(f"Full image window scrolled with mouse wheel: delta={delta}")
-                except Exception as e:
-                    logging.error(f"Error handling mouse wheel in full image window: {str(e)}")
+            full_window.protocol("WM_DELETE_WINDOW", on_closing)
             
-            canvas.bind_all("<MouseWheel>", _on_mousewheel_full)
-            canvas.bind_all("<Button-4>", _on_mousewheel_full)
-            canvas.bind_all("<Button-5>", _on_mousewheel_full)
-            
-            def configure_canvas(event):
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            
-            image_frame.bind("<Configure>", configure_canvas)
-            
-            control_frame = ttk.Frame(full_image_window)
-            control_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=5)
-            
-            ttk.Button(
-                control_frame,
-                text="Zoom In",
-                command=lambda: adjust_zoom(0.2),
-                style="TButton"
-            ).pack(side=tk.LEFT, padx=5)
-            
-            ttk.Button(
-                control_frame,
-                text="Zoom Out",
-                command=lambda: adjust_zoom(-0.2),
-                style="TButton"
-            ).pack(side=tk.LEFT, padx=5)
-            
-            ttk.Button(
-                control_frame,
-                text="Reset Zoom",
-                command=lambda: adjust_zoom(reset=True),
-                style="TButton"
-            ).pack(side=tk.LEFT, padx=5)
-            
-            def adjust_zoom(delta=0, reset=False):
-                nonlocal zoom_factor
-                try:
-                    if reset:
-                        zoom_factor = 1.0
-                    else:
-                        new_zoom = zoom_factor + delta
-                        if min_zoom <= new_zoom <= max_zoom:
-                            zoom_factor = new_zoom
-                        else:
-                            logging.info(f"Zoom limit reached: {zoom_factor}")
-                            return
-                    update_image()
-                except Exception as e:
-                    logging.error(f"Error adjusting zoom: {str(e)}")
-                    self.show_error("Failed to adjust zoom")
-            
-            logging.info(f"Opened full-size image: {file_path} with caption: {caption}")
+            logging.info(f"Opened full image window for {file_path}")
             
         except Exception as e:
-            logging.error(f"Error opening full-size image {file_path}: {str(e)}")
-            self.show_error("Failed to open full-size image")
+            logging.exception(f"Error opening full image {file_path}: {str(e)}")
+            self.status_var.set(f"Error opening image: {str(e)}")
 
-    def show_error(self, message: str):
-        messagebox.showerror("Error", message)
-        logging.error(f"Displayed error message: {message}")
+    def search_photos(self, event=None):
+        try:
+            query = self.search_var.get()
+            self.status_var.set(f"Searching for '{query}'...")
+            self.search_spinner.start()
+            photos = self.photo_manager.search_photos(query)
+            self.display_photos(photos)
+            self.status_var.set(f"Found {len(photos)} photos")
+            logging.info(f"Search completed for query: {query}")
+        except Exception as e:
+            self.status_var.set(f"Error searching: {str(e)}")
+            logging.exception(f"Error searching with query '{query}': {str(e)}")
+        finally:
+            self.search_spinner.stop()
+
+    def sort_photos(self, sort_by: str):
+        try:
+            self.photo_manager.set_sort(sort_by)
+            self.display_photos(self.photo_manager.photos)
+            self.status_var.set(f"Sorted by {sort_by}")
+            logging.info(f"Sorted photos by {sort_by}")
+        except Exception as e:
+            self.status_var.set(f"Error sorting: {str(e)}")
+            logging.exception(f"Error sorting by {sort_by}: {str(e)}")
+
+    def _process_captions(self):
+        while True:
+            try:
+                item = self.caption_queue.get()
+                if item is None:
+                    break
+                file_path, caption_label = item
+                try:
+                    caption = self.caption_generator.generate_image_caption(file_path)
+                    self.root.after(0, lambda: caption_label.config(text=caption))
+                    self.db.add_image(
+                        file_path,
+                        self.db.get_image_metadata(file_path).get('date', ''),
+                        self.db.get_image_metadata(file_path).get('size', 0),
+                        self.db.get_image_metadata(file_path).get('location', ''),
+                        self.db.get_image_metadata(file_path).get('tags', ''),
+                        caption
+                    )
+                    logging.debug(f"Generated caption for {file_path}")
+                except Exception as e:
+                    self.root.after(0, lambda: caption_label.config(text=f"Error: {str(e)}"))
+                    logging.exception(f"Error generating caption for {file_path}: {str(e)}")
+                finally:
+                    self.caption_queue.task_done()
+            except Exception as e:
+                logging.exception(f"Error in caption thread: {str(e)}")

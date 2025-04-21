@@ -1,31 +1,44 @@
 import tkinter as tk
-from ttkthemes import ThemedTk
+from tkinter import ttk, filedialog
 import logging
+import os
 from photo_manager import PhotoManager
-from ui_manager import UIManager
 from caption_generator import CaptionGenerator
+from ui_manager import UIManager
 from database import ImageDatabase
-from utils import setup_logging
-import sys
 
 def main():
+    # Setup logging
+    log_file = os.path.join(os.path.dirname(__file__), "photo_gallery.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='w'),
+            logging.StreamHandler()
+        ]
+    )
+    logging.info("Starting SmartPhotoGallery application")
+    
+    root = tk.Tk()
+    root.title("Smart Photo Gallery")
+    root.state('zoomed')
+    
+    db = ImageDatabase()
+    caption_generator = CaptionGenerator()
+    photo_manager = PhotoManager(caption_generator, db)
+    status_var = tk.StringVar(value="Initializing...")
+    
+    ui_manager = UIManager(root, photo_manager, caption_generator, db, status_var)
+    
     try:
-        setup_logging()
-        logging.info("Photo Gallery application started")
-        
-        root = ThemedTk(theme="arc")
-        root.title("Photo Gallery")
-        root.geometry("1200x800")
-        
-        db = ImageDatabase()
-        caption_generator = CaptionGenerator()
-        photo_manager = PhotoManager(caption_generator, db)
-        ui_manager = UIManager(root, photo_manager, caption_generator, db)
-        
-        root.mainloop()
+        photo_manager.load_model()
+        logging.info("Application initialized successfully")
     except Exception as e:
-        logging.critical(f"Application crashed: {str(e)}")
-        sys.exit(1)
+        logging.exception(f"Error initializing application: {str(e)}")
+        status_var.set(f"Error initializing: {str(e)}")
+    
+    root.mainloop()
 
 if __name__ == "__main__":
     main()

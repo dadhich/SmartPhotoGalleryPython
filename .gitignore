@@ -173,3 +173,6 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 photo_gallery.db
+.DS_Store
+deploy.prototxt
+res10_300x300_ssd_iter_140000.caffemodel
