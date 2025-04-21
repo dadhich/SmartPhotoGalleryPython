@@ -6,11 +6,13 @@ import math
 from typing import Callable
 from photo_manager import PhotoManager
 from caption_generator import CaptionGenerator
+from database import ImageDatabase
 
 class LoadingSpinner:
-    def __init__(self, parent, label: ttk.Label):
+    def __init__(self, parent, label: ttk.Label, prefix: str = "Loading"):
         self.parent = parent
         self.label = label
+        self.prefix = prefix
         self.frames = ["-", "\\", "|", "/"]
         self.current_frame = 0
         self.running = False
@@ -26,34 +28,32 @@ class LoadingSpinner:
 
     def update(self):
         if self.running:
-            self.label.config(text=f"Searching {self.frames[self.current_frame]}")
+            self.label.config(text=f"{self.prefix} {self.frames[self.current_frame]}")
             self.current_frame = (self.current_frame + 1) % len(self.frames)
             self.parent.after(100, self.update)
 
 class UIManager:
-    def __init__(self, root: tk.Tk, photo_manager: PhotoManager, caption_generator: CaptionGenerator):
+    def __init__(self, root: tk.Tk, photo_manager: PhotoManager, caption_generator: CaptionGenerator, db: ImageDatabase):
         self.root = root
         self.photo_manager = photo_manager
         self.caption_generator = caption_generator
+        self.db = db
         self.thumbnail_size = (150, 150)
-        self.displayed_photos = []  # Track currently displayed photos
+        self.displayed_photos = []
         
         self.setup_gui()
 
     def setup_gui(self):
         try:
-            # Apply modern styling
             self.root.configure(bg="#f0f2f5")
             style = ttk.Style()
             style.configure("TButton", padding=10, font=("Helvetica", 12))
             style.configure("TLabel", font=("Helvetica", 11), background="#f0f2f5")
             style.configure("TCombobox", font=("Helvetica", 11))
 
-            # Main container
             self.main_frame = ttk.Frame(self.root, padding="20", style="TFrame")
             self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
             
-            # Folder selection and search
             self.folder_frame = ttk.Frame(self.main_frame)
             self.folder_frame.grid(row=0, column=0, sticky=tk.W, pady=10)
             
@@ -68,12 +68,10 @@ class UIManager:
             self.folder_label = ttk.Label(self.folder_frame, text="No folder selected", style="TLabel")
             self.folder_label.grid(row=0, column=1, padx=10)
             
-            # Loading spinner for folder selection
             self.folder_spinner_label = ttk.Label(self.folder_frame, text="", style="TLabel")
             self.folder_spinner_label.grid(row=0, column=2, padx=10)
-            self.folder_spinner = LoadingSpinner(self.root, self.folder_spinner_label)
+            self.folder_spinner = LoadingSpinner(self.root, self.folder_spinner_label, "Loading")
             
-            # Search bar
             self.search_frame = ttk.Frame(self.main_frame)
             self.search_frame.grid(row=1, column=0, sticky=tk.W, pady=10)
             
@@ -93,9 +91,8 @@ class UIManager:
             
             self.search_spinner_label = ttk.Label(self.search_frame, text="", style="TLabel")
             self.search_spinner_label.grid(row=0, column=2, padx=10)
-            self.search_spinner = LoadingSpinner(self.root, self.search_spinner_label)
+            self.search_spinner = LoadingSpinner(self.root, self.search_spinner_label, "Searching")
             
-            # Sorting options
             self.sort_frame = ttk.Frame(self.main_frame)
             self.sort_frame.grid(row=2, column=0, sticky=tk.W, pady=10)
             
@@ -111,7 +108,6 @@ class UIManager:
             self.sort_combo.grid(row=0, column=1, padx=10)
             self.sort_combo.bind("<<ComboboxSelected>>", self.on_sort_change)
             
-            # Photo grid
             self.canvas = tk.Canvas(self.main_frame, bg="#ffffff", highlightthickness=0, borderwidth=0)
             self.scrollbar = ttk.Scrollbar(
                 self.main_frame, 
@@ -128,7 +124,6 @@ class UIManager:
             self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
             self.canvas.configure(yscrollcommand=self.scrollbar.set)
             
-            # Enable mouse wheel scrolling
             self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_grid)
             self.canvas.bind_all("<Button-4>", self._on_mousewheel_grid)
             self.canvas.bind_all("<Button-5>", self._on_mousewheel_grid)
@@ -136,7 +131,6 @@ class UIManager:
             self.canvas.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
             self.scrollbar.grid(row=3, column=1, sticky=(tk.N, tk.S))
             
-            # Configure weights
             self.root.columnconfigure(0, weight=1)
             self.root.rowconfigure(0, weight=1)
             self.main_frame.columnconfigure(0, weight=1)
@@ -204,7 +198,6 @@ class UIManager:
 
     def display_photos(self):
         try:
-            # Clear existing photos
             for widget in self.scrollable_frame.winfo_children():
                 widget.destroy()
             
@@ -212,11 +205,10 @@ class UIManager:
                 ttk.Label(self.scrollable_frame, text="No photos found", style="TLabel").grid(row=0, column=0)
                 return
             
-            # Calculate columns based on window width
             canvas_width = self.canvas.winfo_width() or 1200
             cols = max(1, canvas_width // (self.thumbnail_size[0] + 20))
             
-            for i, (file_path, date, size, location, caption) in enumerate(self.displayed_photos):
+            for i, (file_path, date, size, location, tags) in enumerate(self.displayed_photos):
                 try:
                     img = Image.open(file_path)
                     img.thumbnail(self.thumbnail_size)
@@ -245,6 +237,11 @@ class UIManager:
                         text=f"Location: {location}",
                         style="TLabel"
                     ).grid(row=3, column=0)
+                    ttk.Label(
+                        photo_frame, 
+                        text=f"Tags: {tags}",
+                        style="TLabel"
+                    ).grid(row=4, column=0)
                 except Exception as e:
                     logging.warning(f"Error displaying photo {file_path}: {str(e)}")
                     continue
@@ -274,19 +271,22 @@ class UIManager:
             
             original_img = Image.open(file_path)
             
-            # Create spinner for caption generation
             caption_frame = ttk.Frame(full_image_window)
             caption_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
             caption_spinner_label = ttk.Label(caption_frame, text="", style="TLabel")
             caption_spinner_label.grid(row=0, column=0, padx=10)
-            caption_spinner = LoadingSpinner(full_image_window, caption_spinner_label)
-            caption_spinner.start()
+            caption_spinner = LoadingSpinner(full_image_window, caption_spinner_label, "Generating")
             
-            # Generate caption asynchronously
-            caption = ""
+            # Check database for cached caption
+            metadata = self.db.get_image_metadata(file_path)
+            caption = metadata.get("detailed_caption") if metadata else None
+            
             def set_caption():
                 nonlocal caption
-                caption = self.caption_generator.generate_image_caption(file_path)
+                if not caption:
+                    caption_spinner.start()
+                    caption = self.caption_generator.generate_image_caption(file_path)
+                    self.db.update_detailed_caption(file_path, caption)
                 caption_label.config(text=caption)
                 caption_spinner.stop()
             

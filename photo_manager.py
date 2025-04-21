@@ -6,12 +6,15 @@ from typing import List, Tuple
 from PIL import Image
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
+from concurrent.futures import ThreadPoolExecutor
+from database import ImageDatabase
 
 class PhotoManager:
-    def __init__(self, caption_generator):
-        self.photos: List[Tuple[str, datetime, int, str, str]] = []  # Added caption field
+    def __init__(self, caption_generator, db: ImageDatabase):
+        self.photos: List[Tuple[str, datetime, int, str, str]] = []
         self.current_sort = "date"
         self.caption_generator = caption_generator
+        self.db = db
         self.nlp_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.caption_embeddings = None
 
@@ -19,37 +22,71 @@ class PhotoManager:
         try:
             self.photos.clear()
             supported_formats = ('.jpg', '.jpeg', '.png', '.gif')
-            
             photo_paths = []
+            
             for root, _, files in os.walk(folder):
                 for file in files:
                     if file.lower().endswith(supported_formats):
                         photo_paths.append(os.path.join(root, file))
             
-            # Generate captions in batch
-            captions = self.caption_generator.generate_batch_captions(photo_paths)
-            
-            for file_path, caption in zip(photo_paths, captions):
-                try:
-                    stats = os.stat(file_path)
-                    modified_time = datetime.fromtimestamp(stats.st_mtime)
-                    file_size = stats.st_size
-                    location = self.get_photo_location(file_path)
-                    self.photos.append((file_path, modified_time, file_size, location, caption))
-                except Exception as e:
-                    logging.warning(f"Error processing file {file_path}: {str(e)}")
-                    continue
+            # Process photos in parallel
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(self.process_photo, path) for path in photo_paths]
+                for future in futures:
+                    try:
+                        photo = future.result()
+                        if photo:
+                            self.photos.append(photo)
+                    except Exception as e:
+                        logging.warning(f"Error processing photo: {str(e)}")
             
             # Compute caption embeddings for search
-            self.caption_embeddings = self.nlp_model.encode(
-                [photo[4] for photo in self.photos], convert_to_tensor=True
-            )
+            if self.photos:
+                self.caption_embeddings = self.nlp_model.encode(
+                    [photo[4] for photo in self.photos], convert_to_tensor=True
+                )
             
             self.sort_photos()
-            logging.info(f"Loaded {len(self.photos)} photos with captions")
+            logging.info(f"Loaded {len(self.photos)} photos with tags")
         except Exception as e:
             logging.error(f"Error loading photos: {str(e)}")
             raise
+
+    def process_photo(self, file_path: str) -> Tuple:
+        try:
+            # Check database for existing metadata
+            metadata = self.db.get_image_metadata(file_path)
+            stats = os.stat(file_path)
+            modified_time = datetime.fromtimestamp(stats.st_mtime)
+            
+            if metadata and metadata["modified_time"].timestamp() == modified_time.timestamp():
+                return (
+                    file_path,
+                    metadata["modified_time"],
+                    metadata["file_size"],
+                    metadata["location"],
+                    metadata["tags"]
+                )
+            
+            # Generate new metadata
+            file_size = stats.st_size
+            location = self.get_photo_location(file_path)
+            tags = self.caption_generator.generate_tags(file_path)
+            
+            # Save to database
+            self.db.add_image_metadata({
+                "file_path": file_path,
+                "modified_time": modified_time,
+                "file_size": file_size,
+                "location": location,
+                "tags": tags,
+                "detailed_caption": None
+            })
+            
+            return (file_path, modified_time, file_size, location, tags)
+        except Exception as e:
+            logging.warning(f"Error processing {file_path}: {str(e)}")
+            return None
 
     def get_photo_location(self, file_path: str) -> str:
         try:
@@ -84,13 +121,9 @@ class PhotoManager:
             if not self.photos or not query:
                 return self.photos
             
-            # Encode query
             query_embedding = self.nlp_model.encode(query, convert_to_tensor=True)
-            
-            # Compute cosine similarities
             cos_scores = util.cos_sim(query_embedding, self.caption_embeddings)[0]
             
-            # Filter photos with scores above threshold
             matched_photos = [
                 self.photos[i] for i, score in enumerate(cos_scores)
                 if score > threshold

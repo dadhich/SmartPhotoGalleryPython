@@ -4,11 +4,13 @@ import torch
 from typing import List
 
 try:
-    from transformers import AutoProcessor, AutoModelForCausalLM
+    from transformers import AutoProcessor, AutoModelForCausalLM, BlipProcessor, BlipForConditionalGeneration
 except ImportError as e:
     logging.critical(f"Failed to import transformers: {str(e)}")
     AutoProcessor = None
     AutoModelForCausalLM = None
+    BlipProcessor = None
+    BlipForConditionalGeneration = None
 
 try:
     import einops
@@ -24,11 +26,13 @@ except ImportError as e:
 
 class CaptionGenerator:
     def __init__(self):
-        self.processor = None
-        self.model = None
-        self.load_model()
+        self.florence_processor = None
+        self.florence_model = None
+        self.blip_processor = None
+        self.blip_model = None
+        self.load_models()
 
-    def load_model(self):
+    def load_models(self):
         try:
             if AutoProcessor is None or AutoModelForCausalLM is None:
                 raise ImportError("Transformers library is not properly installed")
@@ -36,71 +40,101 @@ class CaptionGenerator:
                 raise ImportError("einops is required for Florence-2 but is not installed")
             if timm is None:
                 raise ImportError("timm is required for Florence-2 but is not installed")
+            if BlipProcessor is None or BlipForConditionalGeneration is None:
+                raise ImportError("Transformers BLIP components are not properly installed")
 
-            # Load Florence-2 model and processor
-            self.model = AutoModelForCausalLM.from_pretrained(
+            # Load Florence-2 for detailed captions
+            self.florence_model = AutoModelForCausalLM.from_pretrained(
                 "microsoft/Florence-2-large", trust_remote_code=True
             )
-            self.processor = AutoProcessor.from_pretrained(
+            self.florence_processor = AutoProcessor.from_pretrained(
                 "microsoft/Florence-2-large", trust_remote_code=True
             )
             logging.info("Florence-2 model loaded successfully")
+
+            # Load BLIP for tags
+            self.blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+            self.blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            logging.info("BLIP model loaded successfully")
         except Exception as e:
-            logging.error(f"Error loading Florence-2 model: {str(e)}")
-            self.model = None
-            self.processor = None
-            self.show_error(f"Failed to load image captioning model: {str(e)}. Please ensure einops and timm are installed.")
+            logging.error(f"Error loading models: {str(e)}")
+            self.florence_model = None
+            self.florence_processor = None
+            self.blip_model = None
+            self.blip_processor = None
+            self.show_error(f"Failed to load image captioning models: {str(e)}. Please ensure einops and timm are installed.")
 
     def generate_image_caption(self, image_path: str) -> str:
         try:
-            if self.model is None or self.processor is None:
-                logging.warning("Caption generation failed: Model not loaded")
-                return "Caption unavailable: Model not loaded. Ensure all dependencies (transformers, einops, timm) are installed."
+            if self.florence_model is None or self.florence_processor is None:
+                logging.warning("Detailed caption generation failed: Florence-2 model not loaded")
+                return "Caption unavailable: Florence-2 model not loaded. Ensure all dependencies (transformers, einops, timm) are installed."
 
-            # Load and process image
             img = Image.open(image_path).convert("RGB")
             task_prompt = "<DETAILED_CAPTION>"
-            inputs = self.processor(text=task_prompt, images=img, return_tensors="pt")
+            inputs = self.florence_processor(text=task_prompt, images=img, return_tensors="pt")
 
-            # Generate caption
             with torch.no_grad():
-                generated_ids = self.model.generate(
+                generated_ids = self.florence_model.generate(
                     input_ids=inputs["input_ids"],
                     pixel_values=inputs["pixel_values"],
                     max_new_tokens=1024,
                     num_beams=3,
                 )
-            caption = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            caption = self.florence_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-            # Clean and format caption as a paragraph
             caption = caption.replace("\n", " ").strip()
             if not caption.endswith("."):
                 caption += "."
             caption = f"In the image, {caption.lower()}"
 
-            logging.info(f"Generated caption for {image_path}: {caption}")
+            logging.info(f"Generated detailed caption for {image_path}: {caption}")
             return caption
         except Exception as e:
-            logging.error(f"Error generating caption for {image_path}: {str(e)}")
+            logging.error(f"Error generating detailed caption for {image_path}: {str(e)}")
             return f"Failed to generate caption: {str(e)}"
 
-    def generate_batch_captions(self, image_paths: List[str]) -> List[str]:
+    def generate_tags(self, image_path: str) -> str:
         try:
-            if self.model is None or self.processor is None:
-                logging.warning("Batch caption generation failed: Model not loaded")
-                return ["Caption unavailable: Model not loaded"] * len(image_paths)
+            if self.blip_model is None or self.blip_processor is None:
+                logging.warning("Tag generation failed: BLIP model not loaded")
+                return "Tags unavailable: BLIP model not loaded"
 
-            captions = []
-            for image_path in image_paths:
-                caption = self.generate_image_caption(image_path)
-                captions.append(caption)
-                logging.debug(f"Batch caption generated for {image_path}")
+            img = Image.open(image_path).convert("RGB")
+            inputs = self.blip_processor(images=img, return_tensors="pt")
+
+            with torch.no_grad():
+                outputs = self.blip_model.generate(**inputs)
+            caption = self.blip_processor.decode(outputs[0], skip_special_tokens=True)
             
-            logging.info(f"Generated {len(captions)} batch captions")
-            return captions
+            # Extract key objects as tags
+            tags = ", ".join(word.strip() for word in caption.split() if word.strip().isalpha())
+            if not tags:
+                tags = "unknown"
+            
+            logging.info(f"Generated tags for {image_path}: {tags}")
+            return tags
         except Exception as e:
-            logging.error(f"Error generating batch captions: {str(e)}")
-            return [f"Failed to generate caption: {str(e)}"] * len(image_paths)
+            logging.error(f"Error generating tags for {image_path}: {str(e)}")
+            return "unknown"
+
+    def generate_batch_tags(self, image_paths: List[str]) -> List[str]:
+        try:
+            if self.blip_model is None or self.blip_processor is None:
+                logging.warning("Batch tag generation failed: BLIP model not loaded")
+                return ["Tags unavailable: BLIP model not loaded"] * len(image_paths)
+
+            tags = []
+            for image_path in image_paths:
+                tag = self.generate_tags(image_path)
+                tags.append(tag)
+                logging.debug(f"Batch tag generated for {image_path}")
+            
+            logging.info(f"Generated {len(tags)} batch tags")
+            return tags
+        except Exception as e:
+            logging.error(f"Error generating batch tags: {str(e)}")
+            return ["unknown"] * len(image_paths)
 
     def show_error(self, message: str):
         logging.error(f"Error message: {message}")

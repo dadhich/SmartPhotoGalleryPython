@@ -4,23 +4,23 @@ import logging
 from photo_manager import PhotoManager
 from ui_manager import UIManager
 from caption_generator import CaptionGenerator
+from database import ImageDatabase
 from utils import setup_logging
 import sys
 
 def main():
     try:
-        # Setup logging
         setup_logging()
         logging.info("Photo Gallery application started")
         
-        # Initialize dependencies
         root = ThemedTk(theme="arc")
         root.title("Photo Gallery")
         root.geometry("1200x800")
         
+        db = ImageDatabase()
         caption_generator = CaptionGenerator()
-        photo_manager = PhotoManager(caption_generator)
-        ui_manager = UIManager(root, photo_manager, caption_generator)
+        photo_manager = PhotoManager(caption_generator, db)
+        ui_manager = UIManager(root, photo_manager, caption_generator, db)
         
         root.mainloop()
     except Exception as e:
