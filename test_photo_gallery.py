@@ -45,8 +45,8 @@ class TestPhotoGallery(unittest.TestCase):
         self.assertEqual(self.photo_manager.photos[0][0], 'img1.jpg')
 
     def test_caption_generator_load_model(self):
-        with patch('transformers.BlipProcessor.from_pretrained') as mock_processor, \
-             patch('transformers.BlipForConditionalGeneration.from_pretrained') as mock_model:
+        with patch('transformers.AutoProcessor.from_pretrained') as mock_processor, \
+             patch('transformers.AutoModelForCausalLM.from_pretrained') as mock_model:
             caption_generator = CaptionGenerator()
             mock_processor.assert_called_once()
             mock_model.assert_called_once()
@@ -56,16 +56,16 @@ class TestPhotoGallery(unittest.TestCase):
             caption = self.caption_generator.generate_image_caption("test.jpg")
             self.assertEqual(caption, "Caption unavailable: Model not loaded")
         
-        # Requires actual image and model for full test; mock for simplicity
         with patch('PIL.Image.open') as mock_open, \
              patch.object(self.caption_generator, 'processor') as mock_processor, \
              patch.object(self.caption_generator, 'model') as mock_model:
             mock_open.return_value.convert.return_value = Mock()
-            mock_processor.return_value = {"input_ids": []}
+            mock_processor.return_value = {"input_ids": [], "pixel_values": []}
             mock_model.generate.return_value = [0]
-            mock_processor.decode.return_value = "Test caption"
+            mock_processor.batch_decode.return_value = ["A dog runs in a park with trees."]
             caption = self.caption_generator.generate_image_caption("test.jpg")
-            self.assertEqual(caption, "Test caption")
+            self.assertTrue(caption.startswith("In the image, a dog runs in a park with trees"))
+            self.assertTrue(caption.endswith("."))
 
     def test_ui_manager_display_photos(self):
         ui_manager = UIManager(self.root, self.photo_manager, self.caption_generator)

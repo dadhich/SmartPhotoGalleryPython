@@ -266,7 +266,7 @@ class UIManager:
             image_label = ttk.Label(image_frame)
             image_label.grid(row=0, column=0, padx=10, pady=10)
             
-            caption_label = ttk.Label(image_frame, text="Generating caption...", wraplength=750, style="TLabel")
+            caption_label = ttk.Label(image_frame, text="Generating caption...", wraplength=780, style="TLabel")
             caption_label.grid(row=1, column=0, pady=5)
             
             def update_image():
@@ -279,7 +279,7 @@ class UIManager:
                     photo = ImageTk.PhotoImage(resized_img)
                     image_label.configure(image=photo)
                     image_label.image = photo
-                    canvas.configure(scrollregion=(0, 0, new_size[0], new_size[1] + 50))
+                    canvas.configure(scrollregion=(0, 0, new_size[0], new_size[1] + 100))  # Increased for longer captions
                     logging.info(f"Image zoomed to factor {zoom_factor} for {file_path}")
                 except Exception as e:
                     logging.error(f"Error updating zoomed image: {str(e)}")
