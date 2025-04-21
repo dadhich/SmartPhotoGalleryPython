@@ -26,7 +26,7 @@ class LoadingSpinner:
 
     def update(self):
         if self.running:
-            self.label.config(text=f"Loading {self.frames[self.current_frame]}")
+            self.label.config(text=f"Searching {self.frames[self.current_frame]}")
             self.current_frame = (self.current_frame + 1) % len(self.frames)
             self.parent.after(100, self.update)
 
@@ -36,6 +36,7 @@ class UIManager:
         self.photo_manager = photo_manager
         self.caption_generator = caption_generator
         self.thumbnail_size = (150, 150)
+        self.displayed_photos = []  # Track currently displayed photos
         
         self.setup_gui()
 
@@ -52,7 +53,7 @@ class UIManager:
             self.main_frame = ttk.Frame(self.root, padding="20", style="TFrame")
             self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
             
-            # Folder selection
+            # Folder selection and search
             self.folder_frame = ttk.Frame(self.main_frame)
             self.folder_frame.grid(row=0, column=0, sticky=tk.W, pady=10)
             
@@ -72,9 +73,31 @@ class UIManager:
             self.folder_spinner_label.grid(row=0, column=2, padx=10)
             self.folder_spinner = LoadingSpinner(self.root, self.folder_spinner_label)
             
+            # Search bar
+            self.search_frame = ttk.Frame(self.main_frame)
+            self.search_frame.grid(row=1, column=0, sticky=tk.W, pady=10)
+            
+            self.search_entry = ttk.Entry(self.search_frame, width=50, font=("Helvetica", 11))
+            self.search_entry.grid(row=0, column=0, padx=10)
+            self.search_entry.insert(0, "Enter search query (e.g., 'photos with dogs')")
+            self.search_entry.bind("<FocusIn>", lambda e: self.search_entry.delete(0, tk.END) if self.search_entry.get() == "Enter search query (e.g., 'photos with dogs')" else None)
+            self.search_entry.bind("<Return>", lambda e: self.search_photos())
+            
+            self.search_button = ttk.Button(
+                self.search_frame, 
+                text="Search", 
+                command=self.search_photos,
+                style="TButton"
+            )
+            self.search_button.grid(row=0, column=1, padx=10)
+            
+            self.search_spinner_label = ttk.Label(self.search_frame, text="", style="TLabel")
+            self.search_spinner_label.grid(row=0, column=2, padx=10)
+            self.search_spinner = LoadingSpinner(self.root, self.search_spinner_label)
+            
             # Sorting options
             self.sort_frame = ttk.Frame(self.main_frame)
-            self.sort_frame.grid(row=1, column=0, sticky=tk.W, pady=10)
+            self.sort_frame.grid(row=2, column=0, sticky=tk.W, pady=10)
             
             ttk.Label(self.sort_frame, text="Sort by:", style="TLabel").grid(row=0, column=0, padx=10)
             self.sort_combo = ttk.Combobox(
@@ -110,14 +133,14 @@ class UIManager:
             self.canvas.bind_all("<Button-4>", self._on_mousewheel_grid)
             self.canvas.bind_all("<Button-5>", self._on_mousewheel_grid)
             
-            self.canvas.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-            self.scrollbar.grid(row=2, column=1, sticky=(tk.N, tk.S))
+            self.canvas.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            self.scrollbar.grid(row=3, column=1, sticky=(tk.N, tk.S))
             
             # Configure weights
             self.root.columnconfigure(0, weight=1)
             self.root.rowconfigure(0, weight=1)
             self.main_frame.columnconfigure(0, weight=1)
-            self.main_frame.rowconfigure(2, weight=1)
+            self.main_frame.rowconfigure(3, weight=1)
             
             logging.info("GUI setup completed successfully")
             
@@ -148,11 +171,36 @@ class UIManager:
     def load_and_display_photos(self, folder: str):
         try:
             self.photo_manager.load_photos(folder)
+            self.displayed_photos = self.photo_manager.photos
             self.display_photos()
         except Exception as e:
             self.show_error("Failed to load photos")
         finally:
             self.folder_spinner.stop()
+
+    def search_photos(self):
+        try:
+            query = self.search_entry.get().strip()
+            if not query:
+                self.displayed_photos = self.photo_manager.photos
+                self.display_photos()
+                return
+            
+            self.search_spinner.start()
+            self.root.after(100, lambda: self.execute_search(query))
+        except Exception as e:
+            logging.error(f"Error initiating search: {str(e)}")
+            self.show_error("Failed to search photos")
+
+    def execute_search(self, query: str):
+        try:
+            self.displayed_photos = self.photo_manager.search_photos(query)
+            self.display_photos()
+        except Exception as e:
+            logging.error(f"Error executing search: {str(e)}")
+            self.show_error("Failed to execute search")
+        finally:
+            self.search_spinner.stop()
 
     def display_photos(self):
         try:
@@ -160,15 +208,15 @@ class UIManager:
             for widget in self.scrollable_frame.winfo_children():
                 widget.destroy()
             
-            if not self.photo_manager.photos:
+            if not self.displayed_photos:
                 ttk.Label(self.scrollable_frame, text="No photos found", style="TLabel").grid(row=0, column=0)
                 return
             
             # Calculate columns based on window width
-            canvas_width = self.canvas.winfo_width() or 1200  # Fallback if not yet rendered
+            canvas_width = self.canvas.winfo_width() or 1200
             cols = max(1, canvas_width // (self.thumbnail_size[0] + 20))
             
-            for i, (file_path, date, size, location) in enumerate(self.photo_manager.photos):
+            for i, (file_path, date, size, location, caption) in enumerate(self.displayed_photos):
                 try:
                     img = Image.open(file_path)
                     img.thumbnail(self.thumbnail_size)
@@ -201,7 +249,7 @@ class UIManager:
                     logging.warning(f"Error displaying photo {file_path}: {str(e)}")
                     continue
             
-            logging.info(f"Displayed {len(self.photo_manager.photos)} photos")
+            logging.info(f"Displayed {len(self.displayed_photos)} photos")
             
         except Exception as e:
             logging.error(f"Error displaying photos: {str(e)}")
@@ -210,6 +258,7 @@ class UIManager:
     def on_sort_change(self, event):
         try:
             self.photo_manager.set_sort(self.sort_combo.get())
+            self.displayed_photos = self.photo_manager.photos
             self.display_photos()
             logging.info(f"Sort changed to {self.photo_manager.current_sort}")
         except Exception as e:
@@ -279,7 +328,7 @@ class UIManager:
                     photo = ImageTk.PhotoImage(resized_img)
                     image_label.configure(image=photo)
                     image_label.image = photo
-                    canvas.configure(scrollregion=(0, 0, new_size[0], new_size[1] + 100))  # Increased for longer captions
+                    canvas.configure(scrollregion=(0, 0, new_size[0], new_size[1] + 100))
                     logging.info(f"Image zoomed to factor {zoom_factor} for {file_path}")
                 except Exception as e:
                     logging.error(f"Error updating zoomed image: {str(e)}")

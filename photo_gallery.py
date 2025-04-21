@@ -5,6 +5,7 @@ from photo_manager import PhotoManager
 from ui_manager import UIManager
 from caption_generator import CaptionGenerator
 from utils import setup_logging
+import sys
 
 def main():
     try:
@@ -13,12 +14,12 @@ def main():
         logging.info("Photo Gallery application started")
         
         # Initialize dependencies
-        root = ThemedTk(theme="arc")  # Modern theme
+        root = ThemedTk(theme="arc")
         root.title("Photo Gallery")
         root.geometry("1200x800")
         
-        photo_manager = PhotoManager()
         caption_generator = CaptionGenerator()
+        photo_manager = PhotoManager(caption_generator)
         ui_manager = UIManager(root, photo_manager, caption_generator)
         
         root.mainloop()

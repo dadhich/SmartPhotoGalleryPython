@@ -1,6 +1,7 @@
 import logging
 from PIL import Image
 import torch
+from typing import List
 
 try:
     from transformers import AutoProcessor, AutoModelForCausalLM
@@ -83,6 +84,23 @@ class CaptionGenerator:
             logging.error(f"Error generating caption for {image_path}: {str(e)}")
             return f"Failed to generate caption: {str(e)}"
 
+    def generate_batch_captions(self, image_paths: List[str]) -> List[str]:
+        try:
+            if self.model is None or self.processor is None:
+                logging.warning("Batch caption generation failed: Model not loaded")
+                return ["Caption unavailable: Model not loaded"] * len(image_paths)
+
+            captions = []
+            for image_path in image_paths:
+                caption = self.generate_image_caption(image_path)
+                captions.append(caption)
+                logging.debug(f"Batch caption generated for {image_path}")
+            
+            logging.info(f"Generated {len(captions)} batch captions")
+            return captions
+        except Exception as e:
+            logging.error(f"Error generating batch captions: {str(e)}")
+            return [f"Failed to generate caption: {str(e)}"] * len(image_paths)
+
     def show_error(self, message: str):
-        # This method is called by UIManager to display errors
         logging.error(f"Error message: {message}")
