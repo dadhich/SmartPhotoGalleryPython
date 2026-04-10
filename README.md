@@ -20,8 +20,15 @@ SmartPhotoGallery is an intelligent desktop application for organizing and explo
 ### Prerequisites
 
 - **Operating System**: Windows, macOS, or Linux
-- **Python**: Version 3.13 or higher
+- **Python**: Version 3.12 or higher
 - **Hardware**: Minimum 8GB RAM (16GB+ recommended for model loading); GPU optional for faster processing
+
+On Linux, install system packages before Python dependencies:
+
+```bash
+sudo apt update
+sudo apt install cmake python3-tk python3-pil
+```
 
 ### Dependencies
 

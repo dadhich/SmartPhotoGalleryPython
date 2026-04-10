@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 import os
 from datetime import datetime
 from PIL import Image
@@ -301,7 +301,7 @@ classerend (self):
         with patch('tkinter.Tk') as mock_tk:
             from photo_gallery import main
             main()
-            mock_tk.return_value.state.assert_called_with('zoomed')
+            mock_tk.return_value.state.assert_any_call('zoomed')
 
     def test_face_naming(self):
         file_path = "/test/test.jpg"

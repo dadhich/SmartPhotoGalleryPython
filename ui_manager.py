@@ -4,6 +4,12 @@ import os
 from PIL import Image, ImageTk
 import logging
 from typing import Optional
+
+def maximize_window(window: tk.Tk | tk.Toplevel):
+    try:
+        window.state('zoomed')
+    except tk.TclError:
+        window.state('normal')
 from photo_manager import PhotoManager
 from caption_generator import CaptionGenerator
 from database import ImageDatabase
@@ -109,46 +115,68 @@ class UIManager:
             logging.exception(f"Error loading photos from {folder}: {str(e)}")
 
     def display_photos(self, photos: list):
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
-        
-        self.displayed_photos = photos
-        if not photos:
-            self.status_var.set("No photos found")
-            return
-        
-        max_cols = 4
-        thumbnail_size = (200, 200)
-        
-        for i, (file_path, date, size, location, tags) in enumerate(photos):
-            try:
-                img = Image.open(file_path)
-                img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(img)
-                
-                frame = ttk.Frame(self.scrollable_frame)
-                row = i // max_cols
-                col = i % max_cols
-                frame.grid(row=row, column=col, padx=5, pady=5)
-                
-                label = ttk.Label(frame, image=photo)
-                label.image = photo
-                label.pack()
-                label.bind("<Double-1>", lambda e, path=file_path: self.open_full_image(path))
-                
-                logging.debug(f"Displayed thumbnail for {file_path}")
-                
-            except Exception as e:
-                logging.exception(f"Error displaying thumbnail for {file_path}: {str(e)}")
-                continue
-        
-        self.status_var.set(f"Displaying {len(photos)} photos")
+        try:
+            for widget in self.scrollable_frame.winfo_children():
+                widget.destroy()
+            
+            if not photos:
+                self.displayed_photos = []
+                self.status_var.set("No photos found")
+                return
+            
+            max_display = 500
+            if len(photos) > max_display:
+                logging.warning(
+                    f"Too many photos to render thumbnails ({len(photos)}); limiting to {max_display}"
+                )
+                self.status_var.set(
+                    f"Too many photos ({len(photos)}). Showing first {max_display}. Narrow results with search."
+                )
+                photos = photos[:max_display]
+            else:
+                self.status_var.set(f"Displaying {len(photos)} photos")
+            
+            self.displayed_photos = photos
+            max_cols = 4
+            thumbnail_size = (200, 200)
+            
+            for i, (file_path, date, size, location, tags) in enumerate(photos):
+                try:
+                    img = Image.open(file_path)
+                    img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    
+                    frame = ttk.Frame(self.scrollable_frame)
+                    row = i // max_cols
+                    col = i % max_cols
+                    frame.grid(row=row, column=col, padx=5, pady=5)
+                    
+                    label = ttk.Label(frame, image=photo)
+                    label.image = photo
+                    label.pack()
+                    label.bind("<Double-1>", lambda e, path=file_path: self.open_full_image(path))
+                    
+                    logging.debug(f"Displayed thumbnail for {file_path}")
+                    
+                except (tk.TclError, OSError, MemoryError) as e:
+                    logging.exception(f"Insufficient GUI resources while rendering thumbnail for {file_path}: {str(e)}")
+                    self.status_var.set("Error displaying thumbnails: insufficient GUI resources")
+                    break
+                except Exception as e:
+                    logging.exception(f"Error displaying thumbnail for {file_path}: {str(e)}")
+                    continue
+            
+            if len(photos) <= max_display:
+                self.status_var.set(f"Displaying {len(photos)} photos")
+        except Exception as e:
+            logging.exception(f"Error in display_photos: {str(e)}")
+            self.status_var.set(f"Error displaying photos: {str(e)}")
 
     def open_full_image(self, file_path: str):
         try:
             full_window = tk.Toplevel(self.root)
             full_window.title(os.path.basename(file_path))
-            full_window.state('zoomed')
+            maximize_window(full_window)
             
             # Create canvas with scrollbars
             canvas_frame = ttk.Frame(full_window)

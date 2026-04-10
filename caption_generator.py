@@ -20,6 +20,12 @@ class CaptionGenerator:
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
             ).to(self.device)
+
+            # Workaround for known Hugging Face/Florence-2 compatibility issue
+            # See: https://github.com/huggingface/transformers/issues/39974
+            if not hasattr(self.model, "_supports_sdpa"):
+                self.model._supports_sdpa = False
+
             self.model.eval()
             self.processor = AutoProcessor.from_pretrained(
                 "microsoft/Florence-2-large",

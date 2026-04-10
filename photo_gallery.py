@@ -7,6 +7,13 @@ import logging
 import threading
 import queue
 
+def maximize_window(window: tk.Tk | tk.Toplevel):
+    try:
+        window.state('zoomed')
+    except tk.TclError:
+        window.state('normal')
+
+
 def setup_logging():
     logging.basicConfig(
         level=logging.DEBUG,
@@ -25,7 +32,7 @@ def main():
     root = tk.Tk()
     root.title("SmartPhotoGallery")
     root.geometry("800x600")
-    root.state('zoomed')
+    maximize_window(root)
     
     status_var = tk.StringVar(value="Initializing...")
     
